@@ -37,12 +37,13 @@ async function authenticate(req) {
     // Load admin status from database
     if (req.user.userId) {
       const { rows } = await db.query(
-        'SELECT is_admin, is_banned FROM users WHERE id = $1',
+        'SELECT is_admin, is_banned, role FROM users WHERE id = $1',
         [req.user.userId]
       );
       if (rows.length) {
         req.user.is_admin = rows[0].is_admin;
         req.user.is_banned = rows[0].is_banned;
+        req.user.role = rows[0].role;
       }
     }
   } catch {

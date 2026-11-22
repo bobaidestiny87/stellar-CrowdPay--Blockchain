@@ -332,6 +332,19 @@ router.post('/prepare', requireAuth, contributionValidation, validateRequest, as
     }
   }
 
+  if (campaign.max_per_user) {
+    const { rows: userCapRows } = await db.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total FROM contributions WHERE campaign_id = $1 AND sender_public_key = $2',
+      [campaign_id, sender_public_key]
+    );
+    const alreadyContributed = parseFloat(userCapRows[0].total);
+    if (alreadyContributed + parseFloat(amount) > parseFloat(campaign.max_per_user)) {
+      return res.status(400).json({
+        error: `You have already contributed ${alreadyContributed} ${campaign.asset_type}. The per-contributor limit is ${campaign.max_per_user}.`,
+      });
+    }
+  }
+
   try {
     const intent = await buildContributionIntent({
       campaign,
@@ -367,6 +380,9 @@ router.post('/prepare', requireAuth, contributionValidation, validateRequest, as
       unsigned_xdr: unsignedXdr,
       flow_metadata: intent.flowMetadata,
       conversion_quote: intent.conversionQuote,
+      max_per_user: campaign.max_per_user || null,
+      amount,
+      asset_type: campaign.asset_type,
     });
 
     res.json({
@@ -414,6 +430,22 @@ router.post('/submit-signed', requireAuth, asyncHandler(async (req, res) => {
     });
   } catch (err) {
     return res.status(422).json({ error: err.message });
+  }
+
+  // Recheck max_per_user at submission time to prevent Freighter users from
+  // exceeding the cumulative cap (the prepare step may have raced with
+  // another contribution from the same sender).
+  if (prepared.max_per_user) {
+    const { rows: userCapRows } = await db.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total FROM contributions WHERE campaign_id = $1 AND sender_public_key = $2',
+      [prepared.campaign_id, prepared.sender_public_key]
+    );
+    const alreadyContributed = parseFloat(userCapRows[0].total);
+    if (alreadyContributed + parseFloat(prepared.amount) > parseFloat(prepared.max_per_user)) {
+      return res.status(400).json({
+        error: `You have already contributed ${alreadyContributed} ${prepared.asset_type}. The per-contributor limit is ${prepared.max_per_user}.`,
+      });
+    }
   }
 
   let txHash;
