@@ -5348,8 +5348,8 @@ export default function Campaign() {
       await api.deleteCampaign(campaign.id, token);
       setShowDeleteDialog(false);
       setDeleteConfirmation("");
-      // Redirect to home after successful deletion
-      window.location.href = "/";
+      toast("Campaign deleted successfully.", "success");
+      navigate("/", { replace: true });
     } catch (err) {
       setDeleteError(err.message || "Failed to delete campaign");
     } finally {
