@@ -46,21 +46,34 @@ const redactSensitiveValues = winston.format((info) => {
   return sanitizeInfoObject(info);
 });
 
-const DEFAULT_LEVEL = 'info';
-const VALID_LEVELS = Object.keys(winston.config.npm.levels);
+// Single source of truth for log-level configuration (#398). env.js validates
+// startup with this same resolver, so a level accepted there is never silently
+// replaced here.
+const DEFAULT_LOG_LEVEL = 'info';
+const LOG_LEVELS = Object.keys(winston.config.npm.levels);
 
-function resolveLogLevel(rawLevel) {
-  if (!rawLevel) return DEFAULT_LEVEL;
-  const normalized = String(rawLevel).trim().toLowerCase();
-  if (VALID_LEVELS.includes(normalized)) return normalized;
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[logger] Invalid LOG_LEVEL "${rawLevel}"; falling back to "${DEFAULT_LEVEL}". Valid levels: ${VALID_LEVELS.join(', ')}`
-  );
-  return DEFAULT_LEVEL;
+function warnToStderr(message) {
+  process.stderr.write(`[crowdpay] Warning: ${message}\n`);
 }
 
-function parseModuleOverrides(rawOverrides) {
+function resolveLogLevel(rawLevel, warn = warnToStderr) {
+  if (rawLevel === undefined || rawLevel === null || String(rawLevel).trim() === '') {
+    return DEFAULT_LOG_LEVEL;
+  }
+  const normalized = String(rawLevel).trim().toLowerCase();
+  if (LOG_LEVELS.includes(normalized)) return normalized;
+  warn(
+    `invalid LOG_LEVEL "${rawLevel}" — falling back to "${DEFAULT_LOG_LEVEL}". Valid levels: ${LOG_LEVELS.join(', ')}`
+  );
+  return DEFAULT_LOG_LEVEL;
+}
+
+/**
+ * Parse LOG_LEVEL_MODULES ("module=level,module=level"). Malformed entries and
+ * entries with an unknown level are ignored with a warning, so a typo never
+ * changes a module's verbosity.
+ */
+function parseModuleOverrides(rawOverrides, warn = warnToStderr) {
   const overrides = {};
   if (!rawOverrides) return overrides;
 
@@ -69,26 +82,30 @@ function parseModuleOverrides(rawOverrides) {
     if (!trimmed) continue;
     const separatorIndex = trimmed.indexOf('=');
     if (separatorIndex === -1) {
-      // eslint-disable-next-line no-console
-      console.warn(`[logger] Ignoring malformed LOG_LEVEL_MODULES entry "${trimmed}" (expected module=level).`);
+      warn(`ignoring malformed LOG_LEVEL_MODULES entry "${trimmed}" (expected module=level)`);
       continue;
     }
     const moduleName = trimmed.slice(0, separatorIndex).trim();
-    const rawLevel = trimmed.slice(separatorIndex + 1).trim();
-    if (!moduleName) {
-      // eslint-disable-next-line no-console
-      console.warn(`[logger] Ignoring LOG_LEVEL_MODULES entry "${trimmed}" with empty module name.`);
+    const level = trimmed.slice(separatorIndex + 1).trim().toLowerCase();
+    if (!moduleName || !LOG_LEVELS.includes(level)) {
+      warn(`ignoring invalid LOG_LEVEL_MODULES entry "${trimmed}"`);
       continue;
     }
-    const level = resolveLogLevel(rawLevel);
     overrides[moduleName] = level;
   }
 
   return overrides;
 }
 
-const baseLevel = resolveLogLevel(process.env.LOG_LEVEL);
-const moduleOverrides = parseModuleOverrides(process.env.LOG_LEVEL_MODULES);
+/** Resolve { level, moduleOverrides } from LOG_LEVEL and LOG_LEVEL_MODULES. */
+function resolveLogConfig(env = process.env, warn = warnToStderr) {
+  return {
+    level: resolveLogLevel(env.LOG_LEVEL, warn),
+    moduleOverrides: parseModuleOverrides(env.LOG_LEVEL_MODULES, warn),
+  };
+}
+
+const { level: baseLevel, moduleOverrides } = resolveLogConfig();
 
 // Applies per-module level overrides by dropping records below the configured
 // level for the module that emitted them. Records without a module (or with a
@@ -133,3 +150,6 @@ logger.levels = winston.config.npm.levels;
 logger.moduleOverrides = moduleOverrides;
 
 module.exports = logger;
+module.exports.LOG_LEVELS = LOG_LEVELS;
+module.exports.DEFAULT_LOG_LEVEL = DEFAULT_LOG_LEVEL;
+module.exports.resolveLogConfig = resolveLogConfig;

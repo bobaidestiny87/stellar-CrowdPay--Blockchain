@@ -11,54 +11,12 @@ const REQUIRED = [
 ];
 const STORAGE_VARS = ['STORAGE_BUCKET', 'STORAGE_ENDPOINT'];
 
-const LOG_LEVELS = ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'];
-const DEFAULT_LOG_LEVEL = 'info';
+// Log-level parsing lives in logger.js so startup validation and the logger
+// can never disagree on what is valid (#398).
+const { LOG_LEVELS, DEFAULT_LOG_LEVEL, resolveLogConfig } = require('./logger');
 
 // DB pool tuning variables that must be positive integers when set.
 const POSITIVE_INT_VARS = ['DB_POOL_MAX', 'DB_IDLE_TIMEOUT_MS', 'DB_CONNECTION_TIMEOUT_MS'];
-
-function parseModuleOverrides(raw) {
-  const overrides = {};
-  if (!raw) return overrides;
-  raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .forEach((entry) => {
-      const idx = entry.indexOf('=');
-      if (idx === -1) {
-        process.stderr.write(
-          `[crowdpay] Warning: ignoring malformed LOG_LEVEL_MODULES entry "${entry}" (expected module=level)\n`
-        );
-        return;
-      }
-      const moduleName = entry.slice(0, idx).trim();
-      const level = entry.slice(idx + 1).trim().toLowerCase();
-      if (!moduleName || !LOG_LEVELS.includes(level)) {
-        process.stderr.write(
-          `[crowdpay] Warning: ignoring invalid LOG_LEVEL_MODULES entry "${entry}"\n`
-        );
-        return;
-      }
-      overrides[moduleName] = level;
-    });
-  return overrides;
-}
-
-function resolveLogConfig() {
-  const rawLevel = (process.env.LOG_LEVEL || '').trim().toLowerCase();
-  let level = DEFAULT_LOG_LEVEL;
-  if (rawLevel) {
-    if (LOG_LEVELS.includes(rawLevel)) {
-      level = rawLevel;
-    } else {
-      process.stderr.write(
-        `[crowdpay] Warning: invalid LOG_LEVEL "${process.env.LOG_LEVEL}" — falling back to "${DEFAULT_LOG_LEVEL}"\n`
-      );
-    }
-  }
-  return { level, moduleOverrides: parseModuleOverrides(process.env.LOG_LEVEL_MODULES) };
-}
 
 /**
  * Parse an environment value as a positive integer.

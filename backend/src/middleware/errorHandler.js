@@ -171,13 +171,64 @@ function normalizeErrorResponse(req, res, next) {
   next();
 }
 
+/** Codes derived from HTTP statuses; always safe to send to clients. */
+const STATUS_ERROR_CODES = new Set(
+  [400, 401, 403, 404, 409, 422, 429, 500, 502, 503].map(getErrorCodeForStatus)
+);
+
+/**
+ * Whether `code` is one of our own public error codes (UPPER_SNAKE_CASE, e.g.
+ * NOT_FOUND, CIRCUIT_OPEN, INVALID_CURSOR) rather than an internal one leaked
+ * from a driver or the runtime: Postgres SQLSTATEs ('23505', '42P01'), Node
+ * system errors ('ECONNREFUSED') or Node internals ('ERR_HTTP_HEADERS_SENT').
+ */
+function isPublicErrorCode(code) {
+  if (typeof code !== 'string') return false;
+  if (STATUS_ERROR_CODES.has(code)) return true;
+  return /^[A-Z]+(?:_[A-Z]+)+$/.test(code) && !code.startsWith('ERR_');
+}
+
+/** Generic, client-safe messages for internal errors mapped to public codes. */
+const INTERNAL_ERROR_MESSAGES = {
+  BAD_REQUEST: 'Invalid request',
+  CONFLICT: 'Request conflicts with existing data',
+  INTERNAL_ERROR: 'Internal server error',
+};
+
+/**
+ * Map an error to the { status, code, message } sent to the client. Internal
+ * codes never leave the server: Postgres integrity-constraint violations
+ * (SQLSTATE class 23, e.g. 23505 unique_violation) become 409 CONFLICT, data
+ * exceptions (class 22) become 400 BAD_REQUEST, anything else uses the
+ * status-derived code — and the driver's message (which names tables and
+ * constraints) is replaced with a generic one in every environment.
+ */
+function toPublicError(err) {
+  const explicitStatus = err.statusCode || err.status;
+
+  if (err.code === undefined || err.code === null || isPublicErrorCode(err.code)) {
+    const status = explicitStatus || 500;
+    const message = status >= 500 && process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : err.message || 'Unexpected error';
+    return { status, code: err.code || getErrorCodeForStatus(status), message };
+  }
+
+  const sqlState = String(err.code);
+  let status = explicitStatus;
+  if (!status && /^23[0-9A-Z]{3}$/.test(sqlState)) status = 409;
+  if (!status && /^22[0-9A-Z]{3}$/.test(sqlState)) status = 400;
+  status = status || 500;
+  const code = getErrorCodeForStatus(status);
+  return {
+    status,
+    code,
+    message: INTERNAL_ERROR_MESSAGES[code] || (status >= 500 ? 'Internal server error' : 'Request failed'),
+  };
+}
+
 function errorHandler(err, req, res, next) {
-  const status = err.statusCode || err.status || 500;
-  const isServerError = status >= 500;
-  const message = isServerError && process.env.NODE_ENV === 'production'
-    ? 'Internal server error'
-    : err.message || 'Unexpected error';
-  const code = err.code || getErrorCodeForStatus(status);
+  const { status, code, message } = toPublicError(err);
   const payload = {
     code,
     message,
@@ -187,8 +238,10 @@ function errorHandler(err, req, res, next) {
     payload.fields = err.fields;
   }
 
+  // Full details (including any internal code) stay in the server logs.
   logger.error('Unhandled request error', {
     error: err.message,
+    internal_code: err.code,
     stack: process.env.NODE_ENV === 'production' ? undefined : err.stack,
     status,
   });
@@ -202,5 +255,7 @@ module.exports = {
   errorHandler, 
   buildErrorResponse, 
   sendErrorResponse,
-  getErrorCodeForStatus 
+  getErrorCodeForStatus,
+  isPublicErrorCode,
+  toPublicError,
 };

@@ -208,3 +208,83 @@ test('no route or middleware sends a bare-string or code-less error body', () =>
   }
   assert.deepEqual(offenders, [], `use sendErrorResponse instead:\n${offenders.join('\n')}`);
 });
+
+function throwing(props, message) {
+  return () => {
+    const err = new Error(message);
+    Object.assign(err, props);
+    throw err;
+  };
+}
+
+test('errorHandler never exposes Postgres SQLSTATEs or driver messages (#393)', async () => {
+  const leak = 'duplicate key value violates unique constraint "contributions_tx_hash_key"';
+  const app = buildApp((a) => {
+    a.get('/unique', throwing({ code: '23505', constraint: 'contributions_tx_hash_key' }, leak));
+    a.get('/fk', throwing({ code: '23503' }, 'insert on table "milestones" violates foreign key'));
+    a.get('/data', throwing({ code: '22P02' }, 'invalid input syntax for type uuid: "x"'));
+    a.get('/table', throwing({ code: '42P01' }, 'relation "campaign_secrets" does not exist'));
+    a.get('/socket', throwing({ code: 'ECONNREFUSED' }, 'connect ECONNREFUSED 10.0.0.5:5432'));
+    a.get('/node', throwing({ code: 'ERR_HTTP_HEADERS_SENT' }, 'Cannot set headers'));
+  });
+
+  const unique = await request(app).get('/unique');
+  assert.equal(unique.status, 409);
+  assert.deepEqual(unique.body, {
+    error: { code: 'CONFLICT', message: 'Request conflicts with existing data' },
+  });
+
+  const fk = await request(app).get('/fk');
+  assert.equal(fk.status, 409);
+  assert.equal(fk.body.error.code, 'CONFLICT');
+
+  const data = await request(app).get('/data');
+  assert.equal(data.status, 400);
+  assert.deepEqual(data.body, { error: { code: 'BAD_REQUEST', message: 'Invalid request' } });
+
+  for (const route of ['/table', '/socket', '/node']) {
+    const res = await request(app).get(route);
+    assert.equal(res.status, 500, route);
+    assert.deepEqual(res.body, {
+      error: { code: 'INTERNAL_ERROR', message: 'Internal server error' },
+    }, route);
+  }
+
+  // Nothing internal in any body, in any environment (NODE_ENV is "test" here).
+  for (const route of ['/unique', '/fk', '/data', '/table', '/socket', '/node']) {
+    const res = await request(app).get(route);
+    for (const fragment of ['23505', '23503', '22P02', '42P01', 'ECONNREFUSED', 'ERR_', 'constraint', 'relation', 'table', '10.0.0.5']) {
+      assert.ok(!res.text.includes(fragment), `${route} leaked "${fragment}": ${res.text}`);
+    }
+  }
+});
+
+test('errorHandler keeps an explicit status and our own public codes', async () => {
+  const app = buildApp((a) => {
+    a.get('/explicit', throwing({ code: '23505', status: 422 }, 'raw'));
+    a.get('/own', throwing({ code: 'CIRCUIT_OPEN', status: 503 }, 'Upstream is unavailable'));
+    a.get('/cursor', throwing({ code: 'INVALID_CURSOR', status: 400 }, 'Bad cursor'));
+  });
+
+  const explicit = await request(app).get('/explicit');
+  assert.equal(explicit.status, 422);
+  assert.equal(explicit.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(!explicit.text.includes('23505'));
+
+  const own = await request(app).get('/own');
+  assert.equal(own.status, 503);
+  assert.equal(own.body.error.code, 'CIRCUIT_OPEN');
+
+  const cursor = await request(app).get('/cursor');
+  assert.deepEqual(cursor.body, { error: { code: 'INVALID_CURSOR', message: 'Bad cursor' } });
+});
+
+test('isPublicErrorCode accepts our codes and rejects internal ones', () => {
+  const { isPublicErrorCode } = require('./errorHandler');
+  for (const code of ['NOT_FOUND', 'CONFLICT', 'FORBIDDEN', 'CIRCUIT_OPEN', 'INVALID_CURSOR']) {
+    assert.equal(isPublicErrorCode(code), true, code);
+  }
+  for (const code of ['23505', '42P01', 'XX000', 'ECONNREFUSED', 'ERR_HTTP_HEADERS_SENT', 'P0001', 42, null, undefined]) {
+    assert.equal(isPublicErrorCode(code), false, String(code));
+  }
+});
