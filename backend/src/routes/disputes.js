@@ -337,6 +337,22 @@ router.patch(
   if (!disputes.length) return sendErrorResponse(res, 404, 'Dispute not found');
   const dispute = disputes[0];
 
+  // Documented dispute state machine: open -> under_review -> resolved_* | closed.
+  // Terminal states (resolved_creator, resolved_contributor, closed) accept no
+  // further transitions, which prevents reopening closed disputes or resetting
+  // resolved_at by moving backwards through the flow.
+  const DISPUTE_TRANSITIONS = {
+    open: ['under_review'],
+    under_review: ['resolved_creator', 'resolved_contributor', 'closed'],
+  };
+
+  if (status !== dispute.status) {
+    const allowed = DISPUTE_TRANSITIONS[dispute.status];
+    if (!allowed || !allowed.includes(status)) {
+      return sendErrorResponse(res, 409, `Invalid dispute transition from ${dispute.status} to ${status}`);
+    }
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
