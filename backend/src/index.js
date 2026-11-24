@@ -351,21 +351,8 @@ app.get('/api/stats', async (_req, res) => {
   if (cached) return res.json(cached);
 
   try {
-    const [campaigns, raised, contributions] = await Promise.all([
-      db.query(`SELECT COUNT(*)::int AS total
-                FROM campaigns
-                WHERE deleted_at IS NULL AND status NOT IN ('draft', 'failed')`),
-      db.query(`SELECT COALESCE(SUM(raised_amount), 0)::numeric AS total
-                FROM campaigns
-                WHERE deleted_at IS NULL`),
-      db.query(`SELECT COUNT(*)::int AS total FROM contributions`),
-    ]);
-
-    const payload = {
-      total_campaigns: campaigns.rows[0].total,
-      total_raised: parseFloat(raised.rows[0].total),
-      total_contributions: contributions.rows[0].total,
-    };
+    // #394: one documented predicate for all three counters.
+    const payload = await require('./services/publicStats').fetchPublicStats(db);
 
     cache.set(STATS_CACHE_KEY, payload, 60_000); // 60 s TTL
     res.json(payload);
@@ -417,6 +404,20 @@ function startCampaignStatusCron() {
   logger.info('Campaign status cron scheduled (hourly)');
 }
 
+// #388: drop expired and abandoned Idempotency-Key rows hourly.
+function startIdempotencyPurge() {
+  if (process.env.ENABLE_IDEMPOTENCY_PURGE === 'false') return;
+  const { purgeExpiredIdempotencyKeys } = require('./middleware/idempotency');
+  const timer = setInterval(() => {
+    purgeExpiredIdempotencyKeys()
+      .then((removed) => {
+        if (removed) logger.info('Purged expired idempotency keys', { removed });
+      })
+      .catch((err) => logger.error('Idempotency key purge failed', { error: err.message }));
+  }, 60 * 60 * 1000);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 function startReconciliationCron() {
   if (process.env.ENABLE_RECONCILIATION_CRON === 'false') return;
   const { runReconciliation, getReconcileConfig } = require('./services/reconciliation');
@@ -443,6 +444,7 @@ async function bootstrap() {
     startWebhookRetryPoller();
     startCampaignStatusCron();
     startReconciliationCron();
+    startIdempotencyPurge();
   });
 }
 
