@@ -125,12 +125,16 @@ router.post(
   if (!campaigns.length) return sendErrorResponse(res, 404, 'Campaign not found');
   const campaign = campaigns[0];
 
-  // Must have contributed
+  // Must have contributed: link the contribution to the authenticated user
+  // authoritatively via user_wallet_keys, which also covers Freighter sender
+  // keys that differ from the user's current wallet_public_key.
   const { rows: contributions } = await db.query(
     `SELECT id FROM contributions
-     WHERE campaign_id = $1 AND sender_public_key = (
-       SELECT wallet_public_key FROM users WHERE id = $2
-     ) LIMIT 1`,
+     WHERE campaign_id = $1
+       AND sender_public_key IN (
+         SELECT public_key FROM user_wallet_keys WHERE user_id = $2
+       )
+     LIMIT 1`,
     [campaign.id, req.user.userId]
   );
   if (!contributions.length) {
@@ -337,6 +341,22 @@ router.patch(
   if (!disputes.length) return sendErrorResponse(res, 404, 'Dispute not found');
   const dispute = disputes[0];
 
+  // Documented dispute state machine: open -> under_review -> resolved_* | closed.
+  // Terminal states (resolved_creator, resolved_contributor, closed) accept no
+  // further transitions, which prevents reopening closed disputes or resetting
+  // resolved_at by moving backwards through the flow.
+  const DISPUTE_TRANSITIONS = {
+    open: ['under_review'],
+    under_review: ['resolved_creator', 'resolved_contributor', 'closed'],
+  };
+
+  if (status !== dispute.status) {
+    const allowed = DISPUTE_TRANSITIONS[dispute.status];
+    if (!allowed || !allowed.includes(status)) {
+      return sendErrorResponse(res, 409, `Invalid dispute transition from ${dispute.status} to ${status}`);
+    }
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -424,8 +444,9 @@ router.patch(
       }
     }
 
-    if (status === 'resolved_creator') {
-      // Unfreeze pending on_hold withdrawals for this campaign
+    if (['resolved_creator', 'resolved_contributor', 'closed'].includes(status)) {
+      // Unfreeze pending on_hold withdrawals for this campaign once the
+      // dispute is closed or resolved, so no withdrawal stays on_hold.
       await client.query(
         `UPDATE withdrawal_requests
          SET status = 'pending', dispute_id = NULL
