@@ -678,7 +678,29 @@ router.get('/milestones', async (req, res) => {
  */
 router.post('/campaigns/:id/reconcile', adminJsonParser, async (req, res) => {
   try {
+    const { rows: beforeRows } = await db.query(
+      'SELECT id, raised_amount FROM campaigns WHERE id = $1',
+      [req.params.id]
+    );
+    if (!beforeRows.length) {
+      return sendErrorResponse(res, 404, 'Campaign not found');
+    }
+    const before = beforeRows[0];
+
     const result = await reconcileSingleCampaign(req.params.id);
+
+    const { rows: afterRows } = await db.query(
+      'SELECT raised_amount FROM campaigns WHERE id = $1',
+      [req.params.id]
+    );
+
+    await logAdminAction(req.user.userId, 'reconcile', 'campaign', req.params.id, {
+      previous_raised_amount: before.raised_amount,
+      current_raised_amount: afterRows[0].raised_amount,
+      updated: result.updated,
+      direction: result.direction,
+    }, req);
+
     res.json({ message: 'Reconciliation completed', result });
   } catch (err) {
     if (err.message === 'Campaign not found') {
