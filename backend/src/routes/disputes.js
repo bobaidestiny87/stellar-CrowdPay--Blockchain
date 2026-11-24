@@ -440,8 +440,9 @@ router.patch(
       }
     }
 
-    if (status === 'resolved_creator') {
-      // Unfreeze pending on_hold withdrawals for this campaign
+    if (['resolved_creator', 'resolved_contributor', 'closed'].includes(status)) {
+      // Unfreeze pending on_hold withdrawals for this campaign once the
+      // dispute is closed or resolved, so no withdrawal stays on_hold.
       await client.query(
         `UPDATE withdrawal_requests
          SET status = 'pending', dispute_id = NULL
