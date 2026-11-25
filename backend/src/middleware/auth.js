@@ -49,6 +49,7 @@ async function authenticate(req) {
     // Load admin status and validate token_version from database
     if (req.user.userId) {
       const { rows } = await db.query(
+        'SELECT is_admin, is_banned, role FROM users WHERE id = $1',
         'SELECT role, is_admin, is_super_admin, is_banned, token_version FROM users WHERE id = $1',
         [req.user.userId]
       );
@@ -57,6 +58,7 @@ async function authenticate(req) {
         req.user.is_admin = rows[0].is_admin;
         req.user.is_super_admin = rows[0].is_super_admin;
         req.user.is_banned = rows[0].is_banned;
+        req.user.role = rows[0].role;
 
         // Reject access tokens issued before the last password reset
         const dbVersion = rows[0].token_version ?? 0;

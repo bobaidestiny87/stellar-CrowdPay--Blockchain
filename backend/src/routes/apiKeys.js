@@ -7,12 +7,21 @@ const { apiKeyCreateValidation, validateRequestUnprocessable } = require('../mid
 const { sendErrorResponse } = require('../middleware/errorHandler');
 
 const ALLOWED_SCOPES = new Set(['read', 'write', 'withdrawals', 'developer', 'full']);
+const PRIVILEGED_SCOPES = new Set(['full', 'developer']);
 
-function normalizeScopes(input) {
+function normalizeScopes(input, user) {
   if (!input || !Array.isArray(input) || !input.length) {
     return ['read', 'write', 'withdrawals'];
   }
-  const out = [...new Set(input.filter((s) => typeof s === 'string' && ALLOWED_SCOPES.has(s)))];
+  const isAdmin = user && user.is_admin;
+  const out = [...new Set(
+    input.filter((s) => {
+      if (typeof s !== 'string' || !ALLOWED_SCOPES.has(s)) return false;
+      // Privileged scopes (full, developer) are restricted to admin users.
+      if (PRIVILEGED_SCOPES.has(s) && !isAdmin) return false;
+      return true;
+    })
+  )];
   return out.length ? out : ['read', 'write', 'withdrawals'];
 }
 
@@ -93,7 +102,20 @@ router.get('/', requireAuth, async (req, res) => {
  */
 router.post('/', requireAuth, apiKeyCreateValidation, validateRequestUnprocessable, async (req, res) => {
   const label = (req.body && req.body.label) || 'API key';
-  const scopes = normalizeScopes(req.body && req.body.scopes);
+  const requestedScopes = req.body && req.body.scopes;
+
+  // Reject non-admin users who explicitly request privileged scopes so they
+  // get a clear error instead of silently receiving a reduced scope set.
+  if (Array.isArray(requestedScopes)) {
+    const privilegedRequested = requestedScopes.some((s) => PRIVILEGED_SCOPES.has(s));
+    if (privilegedRequested && !req.user.is_admin) {
+      return res.status(403).json({
+        error: 'The "full" and "developer" scopes require admin privileges',
+      });
+    }
+  }
+
+  const scopes = normalizeScopes(requestedScopes, req.user);
   const rawKey = `cp_live_${crypto.randomBytes(24).toString('hex')}`;
   const keyPrefix = `${rawKey.slice(0, 14)}…`;
   const keyHash = hashApiKey(rawKey);

@@ -1369,6 +1369,9 @@ router.post('/:id/members/accept', requireAuth, asyncHandler(async (req, res) =>
   const { token: inviteToken } = req.body;
   if (!inviteToken) return sendErrorResponse(res, 422, 'Invitation token is required');
 
+  // Atomic conditional UPDATE: only claims the row if it is still unaccepted
+  // and the token matches.  This prevents a race condition where two concurrent
+  // requests both pass the SELECT check and the second silently reassigns user_id.
   const { rows: invites } = await db.query(
     `SELECT id, accepted_at, email, invite_expires_at FROM campaign_members
      WHERE campaign_id = $1 AND invite_token = $2`,
@@ -1406,10 +1409,27 @@ router.post('/:id/members/accept', requireAuth, asyncHandler(async (req, res) =>
   const { rows } = await db.query(
     `UPDATE campaign_members
      SET user_id = $1, accepted_at = NOW(), invite_token = NULL
-     WHERE id = $2
+     WHERE campaign_id = $2
+       AND invite_token = $3
+       AND accepted_at IS NULL
      RETURNING id, campaign_id, user_id, role, accepted_at`,
-    [req.user.userId, invites[0].id]
+    [req.user.userId, req.params.id, inviteToken]
   );
+
+  if (!rows.length) {
+    // Either the token is invalid or the invite was already accepted by
+    // a concurrent request.  Distinguish the two cases for a clear error.
+    const { rows: existing } = await db.query(
+      `SELECT accepted_at FROM campaign_members
+       WHERE campaign_id = $1 AND invite_token = $2`,
+      [req.params.id, inviteToken]
+    );
+
+    if (!existing.length) {
+      return res.status(404).json({ error: 'Invalid invitation token' });
+    }
+    return res.status(409).json({ error: 'Invitation already accepted' });
+  }
 
   res.json(rows[0]);
 }));
